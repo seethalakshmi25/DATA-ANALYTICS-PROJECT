@@ -1,12 +1,12 @@
-EV Adoption and Air Quality Analysis in India
+## EV Adoption and Air Quality Analysis in India
 
-Project Overview
+## Project Overview
 
 This project explores the relationship between Electric Vehicle (EV) adoption and air quality across different states in India. Using vehicle registration and Air Quality Index (AQI) datasets, the analysis identifies the top five states with the highest EV adoption and examines whether these states experience better air quality compared to states with lower EV adoption.
 
 The project uses **Tableau** to transform raw data into interactive visualizations and dashboards, helping uncover patterns and relationships between EV adoption and air pollution.
 
-Objectives
+## Objectives
 
 - Identify the top five Indian states with the highest EV adoption.
 - Calculate and compare EV adoption percentages across states.
