@@ -1,0 +1,4 @@
+income_group,annual_income,income_min_lakh,income_max_lakh,users_low_mn,users_high_mn,users_mid_mn,key_characteristics
+"Lower Income","< 3 Lakhs",0.00,3.00,150.00,200.00,175.000000,"Daily wage workers, rural populations, unorganized sector laborers"
+Lower-Middle,"3 - 7 Lakhs",3.00,7.00,100.00,150.00,125.000000,"Urban migrants, small traders, non-premium pan masala consumers"
+Middle,"7-12 Lakhs",7.00,12.00,30.00,50.00,40.000000,"urban professionals, casual gamers, techies"

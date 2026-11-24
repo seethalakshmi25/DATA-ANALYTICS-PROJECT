@@ -1,0 +1,414 @@
+Before cleaning, confirm that all four imports worked.
+
+Step 0: Check the row counts
+
+USE ipl_impact;
+
+SELECT 'raw_advertisers' AS tbl, COUNT(*) AS n FROM raw_advertisers
+UNION ALL SELECT 'raw_contracts',          COUNT(*) FROM raw_contracts
+UNION ALL SELECT 'raw_revenue_demography', COUNT(*) FROM raw_revenue_demography
+UNION ALL SELECT 'raw_summary_demography', COUNT(*) FROM raw_summary_demography;
+________________________________________________________________________________________________________________________________________________
+
+We'll start with raw_advertisers, which has three problems:
+
+Extra spaces (Very High, Low ).
+The risk column mixes two things: a level (Extremely High) and a reason (Carcinogenic).
+The level is missing for two brands (Rajshree and Kamla say only Carcinogenic (Surrogate Ads)).
+
+Step 1: Fix the spaces and split the risk column
+
+DROP TABLE IF EXISTS clean_advertisers;
+
+CREATE TABLE clean_advertisers AS
+SELECT
+    CAST(TRIM(sno) AS SIGNED)  AS sno,
+    TRIM(advertiser_brand)     AS advertiser_brand,
+    TRIM(category)             AS category,
+    TRIM(brand_ambassadors)    AS brand_ambassadors,
+    TRIM(REPLACE(celebrity_influence, '  ', ' ')) AS celebrity_influence,
+
+    CASE WHEN LOWER(health_social_risk) LIKE 'extremely high%' THEN 'Extremely High'
+         WHEN LOWER(health_social_risk) LIKE 'carcinogenic%'    THEN 'Extremely High'
+         WHEN LOWER(health_social_risk) LIKE 'moderate%'        THEN 'Moderate'
+         WHEN LOWER(health_social_risk) LIKE 'low%'             THEN 'Low'
+         ELSE 'Unknown' END AS risk_level,
+
+    CASE WHEN LOWER(health_social_risk) LIKE '%carcinogenic%' THEN 'Carcinogenic / surrogate ads'
+         WHEN LOWER(health_social_risk) LIKE '%gambling%'     THEN 'Gambling'
+         WHEN LOWER(health_social_risk) LIKE '%sugar%'        THEN 'Sugar content'
+         ELSE 'None' END AS risk_driver
+FROM raw_advertisers;
+*******************************************************************************
+Why each part:
+
+DROP TABLE IF EXISTS lets you re-run the code without errors.
+CREATE TABLE ... AS SELECT saves the query result as a new table.
+TRIM and REPLACE remove the extra spaces.
+CAST(... AS SIGNED) turns the text '1' into the number 1.
+CASE WHEN ... LIKE 'extremely high%' means "if the text starts with these words, call it this". The % means "anything after".
+LOWER() makes the match ignore capital letters.
+The carcinogenic% line is my assumption: the file gives no level for Rajshree and Kamla, so I treat them like Vimal, which is Extremely High. Change it if you disagree.
+
+Step 2: Check the result
+
+SELECT advertiser_brand, celebrity_influence, risk_level, risk_driver
+FROM clean_advertisers;
+___________________________________________________________________________________________________________________________________________________
+
+Next table: raw_contracts
+
+Problems:
+
+Three partners have n/a instead of a number, so you can't do maths on the column.
+The duration is text: 5 Years (2024 - 2028).
+Step 1: Clean it
+
+DROP TABLE IF EXISTS clean_contracts;
+
+CREATE TABLE clean_contracts AS
+WITH t AS (
+    SELECT
+        TRIM(contract_type)        AS contract_type,
+        TRIM(partner_sponsor_name) AS partner_sponsor_name,
+        NULLIF(REPLACE(LOWER(TRIM(amount_in_crores_2025)),      ',', ''), 'n/a') AS amt,
+        NULLIF(REPLACE(LOWER(TRIM(total_deal_value_in_crores)), ',', ''), 'n/a') AS tot,
+        TRIM(contract_duration)    AS dur
+    FROM myproject.fact_ipl_central_contracts
+)
+SELECT
+    contract_type,
+    partner_sponsor_name,
+    CAST(amt AS DECIMAL(12,2)) AS amount_cr_2025,
+    CAST(tot AS DECIMAL(12,2)) AS total_deal_value_cr,
+    CAST(SUBSTR(dur, 1, INSTR(dur, ' ') - 1) AS SIGNED) AS duration_years,
+    CAST(SUBSTR(dur, INSTR(dur, '(') + 1, 4) AS SIGNED) AS start_year,
+    CAST(SUBSTR(dur, LENGTH(dur) - 4, 4)     AS SIGNED) AS end_year,
+    CASE WHEN contract_type LIKE '%Broadcaster%' OR contract_type LIKE '%Streaming%'
+         THEN 'Media rights' ELSE 'Sponsorship' END AS revenue_stream,
+    CASE WHEN amt IS NULL THEN 0 ELSE 1 END AS amount_disclosed
+FROM t;
+*******************************************************************************************************************************
+Why each part:
+
+WITH t AS (...) is a first rough pass, and the final SELECT builds on it. It keeps each step small.
+NULLIF(x, 'n/a') turns n/a into an empty value (NULL), so it can become a number.
+CAST(... AS DECIMAL) makes it a real number. Only do this after the text is clean digits.
+SUBSTR(text, start, length) cuts out a piece of the text.
+INSTR(text, ' ') finds the position of the first space.
+So 5 Years (2024 - 2028) gives 5 (before the first space), 2024 (4 letters after the (), and 2028 (the last 4 letters before )).
+revenue_stream labels the two big broadcasters as "Media rights" and everyone else as "Sponsorship". We'll use this later.
+
+The text is 5 Years (2024 - 2028). Here it is with every character numbered, since SQL counts characters from 1:
+
+position:  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21
+character: 5  _  Y  e  a  r  s  _  (  2  0  2  4  _  -  _  2  0  2  8  )
+
+The underscore _ marks a space. The total length is 21.
+
+The two tools
+INSTR(text, 'x') answers "at what position is x?"
+SUBSTR(text, start, count) means "start at this position and take this many characters."
+CAST(... AS SIGNED) turns the piece of text into a number, so '5' becomes 5.
+
+Line 1: duration_years
+
+CAST(SUBSTR(dur, 1, INSTR(dur, ' ') - 1) AS SIGNED)
+
+Work from the inside out:
+
+INSTR(dur, ' ') finds the first space. It's at position 2.
+- 1 gives 1, the number of characters before that space.
+SUBSTR(dur, 1, 1) starts at position 1 and takes 1 character: 5.
+CAST turns it into the number 5.
+
+Line 2: start_year
+
+CAST(SUBSTR(dur, INSTR(dur, '(') + 1, 4) AS SIGNED)
+
+INSTR(dur, '(') finds the bracket at position 9.
++ 1 moves to position 10, the first digit after the bracket.
+SUBSTR(dur, 10, 4) takes 4 characters (positions 10 to 13): 2024.
+CAST gives the number 2024.
+
+Line 3: end_year
+
+CAST(SUBSTR(dur, LENGTH(dur) - 4, 4) AS SIGNED)
+
+LENGTH(dur) is 21, the total number of characters.
+- 4 gives 17.
+SUBSTR(dur, 17, 4) takes positions 17 to 20: 2028. The last character, ), at position 21, is left out.
+CAST gives 2028.
+_________________________________________________________________________________________________________________________________________________
+
+Next table: raw_revenue_demography
+
+This is the hardest table, so we'll do it in two steps. First, look at the problem.
+
+SELECT company, latest_annual_revenue FROM raw_revenue_demography;
+
+The revenue column holds sentences, not numbers:
+We need to pull out a number, a low and high value, the year, and a few flags.
+
+SELECT
+    company,
+    latest_annual_revenue,
+    REPLACE(REPLACE(TRIM(SUBSTR(latest_annual_revenue, 1,
+        INSTR(latest_annual_revenue, '(') - 1)), ',', ''), ' ', '') AS number_text
+FROM raw_revenue_demography
+WHERE LOWER(latest_annual_revenue) NOT LIKE 'not disclosed%';
+
+Why, working from the inside out (using 6,384 (FY23) as the example):
+
+INSTR(..., '(') finds the bracket. - 1 gives the number of characters before it.
+SUBSTR(text, 1, that) keeps only the part before the bracket: 6,384 .
+TRIM removes the trailing space.
+REPLACE(..., ',', '') removes the comma, giving 6384.
+The second REPLACE removes any spaces, so 2,000- 2,500 becomes 2000-2500.
+
+The WHERE line skips "Not disclosed" rows, because they have no bracket to find.
+
+DROP TABLE IF EXISTS clean_revenue_demography;
+
+CREATE TABLE clean_revenue_demography AS
+WITH s1 AS (
+    SELECT
+        TRIM(company) AS company, TRIM(sector) AS sector, TRIM(parent) AS parent,
+        TRIM(latest_annual_revenue) AS rev_raw,
+        TRIM(age_group) AS age_group, TRIM(income_group) AS income_group,
+        TRIM(urban_population) AS urban_population,
+        TRIM(demographic_notes) AS demographic_notes,
+        REPLACE(TRIM(COALESCE(`Demographic Notes`,'')), ' ', '') AS source_url,
+        CASE WHEN LOWER(latest_annual_revenue) LIKE 'not disclosed%' THEN NULL
+             ELSE REPLACE(REPLACE(TRIM(SUBSTR(latest_annual_revenue, 1,
+                  INSTR(latest_annual_revenue, '(') - 1)), ',', ''), ' ', '')
+        END AS num_txt
+    FROM myproject.fact_revenue_demography
+),
+s2 AS (
+    SELECT s1.*,
+        CASE WHEN num_txt IS NULL THEN NULL
+             WHEN INSTR(num_txt, '-') > 0 THEN CAST(SUBSTR(num_txt, 1, INSTR(num_txt, '-') - 1) AS DECIMAL(12,2))
+             ELSE CAST(num_txt AS DECIMAL(12,2)) END AS rev_low,
+        CASE WHEN num_txt IS NULL THEN NULL
+             WHEN INSTR(num_txt, '-') > 0 THEN CAST(SUBSTR(num_txt, INSTR(num_txt, '-') + 1) AS DECIMAL(12,2))
+             ELSE CAST(num_txt AS DECIMAL(12,2)) END AS rev_high
+    FROM s1
+)
+SELECT
+    company, sector, parent,
+    rev_low  AS revenue_cr_low,
+    rev_high AS revenue_cr_high,
+    (rev_low + rev_high) / 2 AS revenue_cr_mid,
+    CASE WHEN INSTR(rev_raw, 'FY') > 0
+         THEN 2000 + CAST(SUBSTR(rev_raw, INSTR(rev_raw, 'FY') + 2, 2) AS SIGNED) END AS fiscal_year,
+    CASE WHEN LOWER(rev_raw) LIKE '%est%'            THEN 1 ELSE 0 END AS is_estimate,
+    CASE WHEN LOWER(rev_raw) LIKE '%group%'          THEN 1 ELSE 0 END AS is_group_level,
+    CASE WHEN LOWER(rev_raw) LIKE 'not disclosed%'   THEN 0 ELSE 1 END AS is_disclosed,
+    CAST(SUBSTR(age_group, 1, INSTR(age_group, ' to ') - 1) AS SIGNED) AS core_age_min,
+    CAST(SUBSTR(age_group, INSTR(age_group, ' to ') + 4, 2) AS SIGNED) AS core_age_max,
+    income_group,
+    CASE WHEN LOWER(urban_population) LIKE '%rural%'  THEN 1 ELSE 0 END AS reaches_rural,
+    CASE WHEN LOWER(urban_population) LIKE '%tier 2%' THEN 1 ELSE 0 END AS reaches_tier23,
+    CASE WHEN SUBSTR(demographic_notes, 1, 1) BETWEEN '0' AND '9'
+         THEN CAST(SUBSTR(demographic_notes, 1, INSTR(demographic_notes, '%') - 1) AS SIGNED) END AS male_pct,
+    demographic_notes,
+    NULLIF(source_url, '') AS source_url
+FROM s2;
+
+SELECT * FROM clean_revenue_demography;
+**********************************************************************************************************************************************************************
+What the main parts do:
+
+s1 and s2 are two small passes. The first extracts the number text, and the second splits a range like 2000-2500 into low and high. The final SELECT adds the rest.
+
+revenue_cr_mid is the average of low and high. For 2000-2500 it's 2250, and for a single number it's that number.
+
+fiscal_year: finds FY, takes the 2 digits after it (23) and adds 2000, giving 2023.
+
+The is_... columns are 1/0 flags. One matters: Vimal's 5,267 is the whole DS Group's revenue, not just the brand's. is_group_level records that, so you can mention it in your report.
+
+core_age_min and core_age_max come from text like 20 to 35 (core).... They use the same SUBSTR/INSTR trick as before.
+
+male_pct takes 77 from 77% male. The BETWEEN '0' AND '9' test makes sure we only try when the text starts with a digit.
+
+REPLACE(..., ' ', '') on the URL removes stray spaces such as entrepreneurs to day.in.
+
+Layer 1: s1 (tidy the text)
+TRIM(company) AS company, TRIM(sector) AS sector ...
+
+TRIM removes stray spaces at the start and end. AS gives the result a clean name.
+
+The URL line:
+REPLACE(TRIM(COALESCE(`Demographic Notes`,'')), ' ', '') AS source_url
+
+COALESCE(x, '') means "if x is empty, use '' instead". It stops errors on rows with no URL.
+REPLACE(..., ' ', '') deletes spaces. The original had broken links like entrepreneurs to day.in.
+
+CASE WHEN LOWER(latest_annual_revenue) LIKE 'not disclosed%' THEN NULL
+     ELSE REPLACE(REPLACE(TRIM(SUBSTR(latest_annual_revenue, 1,
+          INSTR(latest_annual_revenue, '(') - 1)), ',', ''), ' ', '')
+END AS num_txt
+
+In plain words: "If it says Not disclosed, leave it empty. Otherwise, keep only the part before the bracket and remove commas and spaces."
+
+Here is how that works on 2,000- 2,500 (FY23, est.), one step at a time:
+
+Step	Result
+INSTR(text, '(') finds the bracket	position 14
+SUBSTR(text, 1, 14 - 1) keeps everything before it	2,000- 2,500
+TRIM removes the trailing space	2,000- 2,500
+REPLACE(..., ',', '') removes commas	2000- 2500
+REPLACE(..., ' ', '') removes spaces	2000-2500
+
+The three examples now give 6384, 2000-2500 and empty (NULL).
+
+Layer 2: s2 (make real numbers)
+sql
+CASE WHEN num_txt IS NULL THEN NULL
+     WHEN INSTR(num_txt, '-') > 0 THEN CAST(SUBSTR(num_txt, 1, INSTR(num_txt, '-') - 1) AS DECIMAL(12,2))
+     ELSE CAST(num_txt AS DECIMAL(12,2)) END AS rev_low,
+
+Read it top to bottom, and the first match wins:
+
+No number? Then leave it empty.
+Contains a dash (a range like 2000-2500)? Take the part before the dash.
+Otherwise it's a single number, so use it as is.
+
+rev_high does the same, but takes the part after the dash. SELECT s1.* means "keep every column from s1 and add two new ones".
+
+Layer 3: the final SELECT (name and add columns)
+Line	What it does
+(rev_low + rev_high) / 2 AS revenue_cr_mid	The average. 2000 and 2500 give 2250. A single number stays the same.
+2000 + CAST(SUBSTR(rev_raw, INSTR(rev_raw,'FY')+2, 2) AS SIGNED)	Finds FY, takes the 2 digits after it (23), adds 2000, giving 2023.
+CASE WHEN ... LIKE '%est%' THEN 1 ELSE 0 END AS is_estimate	A yes/no flag (1/0): does the text contain "est"?
+is_group_level	The same trick for the word "group". Vimal's figure is for the whole DS Group, so we flag it.
+is_disclosed	0 for "Not disclosed", 1 otherwise.
+core_age_min, core_age_max	From 20 to 35 (core)..., takes the number before to (20) and the 2 digits after it (35).
+reaches_rural, reaches_tier23	Flags (1/0): does the text mention "rural" or "tier 2"?
+male_pct	From 77% male, takes the digits before %. The BETWEEN '0' AND '9' test only runs it when the text starts with a digit, so it skips rows like Mass-market....
+
+Number the characters
+position:  1  2  3  4  5  6  7  8  9 ...
+character: 2  0  _  t  o  _  3  5  _  (core)...
+
+The underscore _ marks a space. The marker ' to ' is 4 characters: space, t, o, space.
+
+Line 1: core_age_min
+sql
+CAST(SUBSTR(age_group, 1, INSTR(age_group, ' to ') - 1) AS SIGNED)
+INSTR(age_group, ' to ') finds where the marker starts. The leading space is at position 3.
+- 1 gives 2, the number of characters before the marker.
+SUBSTR(age_group, 1, 2) takes 2 characters from position 1: 20.
+CAST(... AS SIGNED) turns it into the number 20.
+Line 2: core_age_max
+sql
+CAST(SUBSTR(age_group, INSTR(age_group, ' to ') + 4, 2) AS SIGNED)
+INSTR(...) is 3 again.
++ 4 gives 7. The marker is 4 characters long, so the text after it starts at position 3 + 4 = 7.
+SUBSTR(age_group, 7, 2) takes 2 characters from position 7: 35.
+CAST gives the number 35.
+Why it ignores the second range
+
+The text also contains also 18 to 40+. INSTR returns only the first match of to, so it never looks at the second. That's what we want, because we only need the core age range (20 to 35).
+________________________________________________________________________________________________________________________________________________________________________________________________
+
+next summary demography
+
+DROP TABLE IF EXISTS clean_summary_demography;
+
+CREATE TABLE clean_summary_demography AS
+WITH s1 AS (
+    SELECT
+        TRIM(income_group)  AS income_group,
+        TRIM(annual_income) AS annual_income,
+        TRIM(REPLACE(REPLACE(estimated_user_population, '~', ''), 'million', '')) AS pop_txt,
+        REPLACE(REPLACE(REPLACE(annual_income, 'Lakhs', ''), ' ', ''), '<', '')   AS inc_txt,
+        TRIM(key_characteristics) AS key_characteristics
+    FROM myproject.fact_summary_demography
+)
+SELECT
+    income_group,
+    annual_income,
+    CASE WHEN annual_income LIKE '<%' THEN 0
+         ELSE CAST(SUBSTR(inc_txt, 1, INSTR(inc_txt, '-') - 1) AS DECIMAL(6,2)) END AS income_min_lakh,
+    CASE WHEN annual_income LIKE '<%' THEN CAST(inc_txt AS DECIMAL(6,2))
+         ELSE CAST(SUBSTR(inc_txt, INSTR(inc_txt, '-') + 1) AS DECIMAL(6,2)) END   AS income_max_lakh,
+    CAST(SUBSTR(pop_txt, 1, INSTR(pop_txt, ' to ') - 1) AS DECIMAL(8,2)) AS users_low_mn,
+    CAST(SUBSTR(pop_txt, INSTR(pop_txt, ' to ') + 4)    AS DECIMAL(8,2)) AS users_high_mn,
+    (CAST(SUBSTR(pop_txt, 1, INSTR(pop_txt, ' to ') - 1) AS DECIMAL(8,2))
+   + CAST(SUBSTR(pop_txt, INSTR(pop_txt, ' to ') + 4)    AS DECIMAL(8,2))) / 2 AS users_mid_mn,
+    key_characteristics
+FROM s1;
+
+SELECT * FROM clean_summary_demography;
+**********************************************************************************************************************************************
+What the code does
+
+The raw text is ~150 to 200 million, and we want 150 and 200 as numbers.
+
+Layer 1 (s1):
+
+REPLACE(..., '~', '') deletes the ~.
+REPLACE(..., 'million', '') deletes the word.
+TRIM removes the leftover space.
+The result, pop_txt, is 150 to 200.
+
+Final SELECT:
+
+Low: SUBSTR(pop_txt, 1, INSTR(pop_txt, ' to ') - 1) takes everything before to, which is 150.
+High: SUBSTR(pop_txt, INSTR(pop_txt, ' to ') + 4) takes everything after the 4-character marker to, which is 200. There's no length at the end, so it takes the rest of the text. That works for any number of digits.
+Mid: the average of the two, (150 + 200) / 2 = 175.
+_mn in the names means millions.
+
+The text at this point is 150 to 200. Earlier in the code, REPLACE removed the ~ and the word "million".
+
+Number the characters
+position:  1  2  3  4  5  6  7  8  9  10
+character: 1  5  0  _  t  o  _  2  0  0
+
+The underscore _ marks a space. The marker ' to ' is 4 characters long (space, t, o, space), and it starts at position 4.
+
+Line 1: users_low_mn
+sql
+CAST(SUBSTR(pop_txt, 1, INSTR(pop_txt, ' to ') - 1) AS DECIMAL(8,2))
+INSTR(pop_txt, ' to ') finds where the marker starts, at position 4.
+- 1 gives 3, the number of characters before it.
+SUBSTR(pop_txt, 1, 3) takes 3 characters from position 1: 150.
+CAST(... AS DECIMAL(8,2)) turns the text into the number 150.00.
+Line 2: users_high_mn
+sql
+CAST(SUBSTR(pop_txt, INSTR(pop_txt, ' to ') + 4) AS DECIMAL(8,2))
+INSTR(...) is 4 again.
++ 4 gives 8. The marker is 4 characters long, so the text after it starts at position 8.
+SUBSTR(pop_txt, 8) has no length, which means "take everything from position 8 to the end": 200.
+CAST gives 200.00.
+
+The last line uses no length because the numbers have different digit counts (50 has 2 digits, 200 has 3). Without a length, SUBSTR takes however many there are.
+
+Line 3: users_mid_mn
+sql
+(CAST(low part) + CAST(high part)) / 2
+
+It's the same two pieces added together and divided by 2: (150 + 200) / 2 = 175.
+
+The two CAST pieces are written out again because SQL can't use a column's new name (users_low_mn) inside the same SELECT that creates it.
+
+What DECIMAL(8,2) means
+8 is the maximum number of digits in total.
+2 is how many are after the decimal point.
+So 150 is stored as 150.00. Room for 6 digits before the point is more than we need, since the biggest value is 200.
+
+The text values are < 3 Lakhs, 3 - 7 Lakhs and 7-12 Lakhs.
+
+Step 1: inc_txt. Remove the word Lakhs, all spaces, and the <. The three values become:
+
+3
+3-7
+7-12
+
+Step 2: min and max.
+
+A value starting with < (the LIKE '<%' test) means "less than 3". So min = 0 and max = 3.
+For the others, take the part before the - as min and the part after it as max. This is the same SUBSTR/INSTR pattern as before.
+
